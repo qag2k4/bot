@@ -106,7 +106,13 @@ async def play_next():
                     continue
 
                 finished = asyncio.Event()
-                source = discord.FFmpegPCMAudio(filename, executable=FFMPEG_PATH, options="-vn")
+
+                # VÁ LỖI FFMPEG BẰNG BEFORE_OPTIONS
+                ffmpeg_options = {
+                    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                    'options': '-vn'
+                }
+                source = discord.FFmpegPCMAudio(filename, executable=FFMPEG_PATH, **ffmpeg_options)
 
                 def after_play(err):
                     if err:
@@ -114,7 +120,7 @@ async def play_next():
                     try:
                         if os.path.exists(filename):
                             os.remove(filename)
-                    except Exception as cleanup_error:
+                    except Exception:
                         pass
                     bot.loop.call_soon_threadsafe(finished.set)
 
@@ -142,7 +148,6 @@ async def play_next():
 
 @bot.event
 async def on_ready():
-    # ÉP LOAD THƯ VIỆN ÂM THANH CHO LINUX
     if not discord.opus.is_loaded():
         try:
             discord.opus.load_opus('libopus.so.0')
@@ -156,7 +161,7 @@ async def on_ready():
         synced = await bot.tree.sync(guild=MY_GUILD)
         print("=========================================")
         print(f"Bot online: {bot.user}")
-        print(f"ĐÃ DỌN RÁC VÀ ĐỒNG BỘ {len(synced)} LỆNH CHUẨN!")
+        print(f"ĐÃ KIẾN TRÚC LẠI LUỒNG ASYNC & VÁ LỖI {len(synced)} LỆNH!")
         print("=========================================")
     except Exception as e:
         print("Sync slash lỗi:", repr(e))
@@ -176,56 +181,73 @@ async def on_voice_state_update(member, before, after):
         after_name = after.channel.name if after.channel else None
         print(f"VOICE UPDATE: {before_name} -> {after_name}")
 
+        if before.channel and not after.channel:
+            vc = member.guild.voice_client
+            if vc:
+                try:
+                    await vc.disconnect(force=True)
+                except:
+                    pass
+            global is_speaking, tts_queue
+            tts_queue.clear()
+            is_speaking = False
+
+# HÀM XỬ LÝ BACKGROUND ĐỂ CHỐNG LỖI "KHÔNG PHẢN HỒI"
+async def connect_voice_background(channel, guild):
+    try:
+        vc = guild.voice_client
+        if not vc:
+            print(f"Background Task: Connecting to {channel.name}")
+            await channel.connect(self_deaf=True)
+        elif vc.channel != channel:
+            await vc.move_to(channel)
+    except Exception as e:
+        print(f"Background Connect Error: {e}")
+
 @bot.tree.command(name="join", description="Gọi bot vào phòng voice", guild=MY_GUILD)
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
-        await interaction.response.send_message("Bạn cần vào voice trước", ephemeral=True)
+        await interaction.response.send_message("Bạn cần vào phòng voice trước!", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
-    channel = interaction.user.voice.channel
-    vc = interaction.guild.voice_client
+    # Trả lời NGAY LẬP TỨC để Discord không báo đỏ
+    await interaction.response.send_message("Đang tiến hành kết nối...", ephemeral=True)
+    
+    # Ném việc kết nối (chậm) sang một luồng ngầm
+    asyncio.create_task(connect_voice_background(interaction.user.voice.channel, interaction.guild))
 
-    try:
-        if not vc:
-            print(f"Connecting to voice: {channel.name}")
-            # Tắt reconnect, bật timeout để bắt lỗi
-            await channel.connect(self_deaf=True, timeout=15.0, reconnect=False)
-        elif vc.channel != channel:
-            await vc.move_to(channel)
-        await interaction.followup.send(f"Bot đã vào {channel.name}", ephemeral=True)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ **Lỗi Mạng:** Không thể truyền âm thanh (UDP Timeout). Hãy thử đổi Region của phòng thoại sang **US West** hoặc **Sydney**.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"Lỗi vào voice: {e}", ephemeral=True)
 
 @bot.tree.command(name="n", description="Bot nói nội dung bạn nhập", guild=MY_GUILD)
 async def n(interaction: discord.Interaction, text: str):
     global TTS_TEXT_CHANNEL_ID
 
     if not interaction.user.voice:
-        await interaction.response.send_message("Bạn cần vào voice trước", ephemeral=True)
+        await interaction.response.send_message("Bạn cần vào phòng voice trước!", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
+    # Trả lời NGAY LẬP TỨC
+    await interaction.response.send_message("Đã nhận lệnh, đang tải giọng nói...", ephemeral=True)
+    
     TTS_TEXT_CHANNEL_ID = interaction.channel.id
     channel = interaction.user.voice.channel
-    vc = interaction.guild.voice_client
+    
+    # Tạo một hàm con chạy ngầm để xử lý vừa connect vừa đọc
+    async def process_n_background():
+        try:
+            vc = interaction.guild.voice_client
+            if not vc:
+                print(f"Background Task (/n): Connecting to {channel.name}")
+                vc = await channel.connect(self_deaf=True)
+            elif vc.channel != channel:
+                await vc.move_to(channel)
+                
+            add_to_queue(vc, text)
+        except Exception as e:
+            print(f"Background Error in /n: {e}")
 
-    try:
-        if not vc:
-            print(f"Connecting for /n: {channel.name}")
-            # Tắt reconnect, bật timeout để bắt lỗi
-            vc = await channel.connect(self_deaf=True, timeout=15.0, reconnect=False)
-        elif vc.channel != channel:
-            await vc.move_to(channel)
+    # Đẩy vào luồng ngầm
+    asyncio.create_task(process_n_background())
 
-        add_to_queue(vc, text)
-        await interaction.followup.send("Đang đọc...", ephemeral=True)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ **Lỗi Mạng:** Không thể truyền âm thanh (UDP Timeout). Hãy thử đổi Region của phòng thoại sang **US West** hoặc **Sydney**.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"Lỗi đọc: {e}", ephemeral=True)
 
 @bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn", guild=MY_GUILD)
 async def auto(interaction: discord.Interaction):
