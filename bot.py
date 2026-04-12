@@ -10,9 +10,13 @@ from discord.ext import commands
 from gtts import gTTS
 from dotenv import load_dotenv
 
+print("BOT.PY STARTING...")
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+print("DISCORD_TOKEN exists:", bool(TOKEN))
+
 FFMPEG_PATH = "ffmpeg"
 
 intents = discord.Intents.default()
@@ -26,11 +30,13 @@ TTS_TEXT_CHANNEL_ID = None
 tts_queue = deque()
 is_speaking = False
 
+
 def clean_text(text: str) -> str:
     text = re.sub(r"http\S+", "", text)
     text = re.sub(r"<@!?\d+>", "", text)
     text = re.sub(r"[^\w\sÀ-ỹ]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
 
 def add_to_queue(vc: discord.VoiceClient, text: str):
     global is_speaking
@@ -40,6 +46,7 @@ def add_to_queue(vc: discord.VoiceClient, text: str):
     tts_queue.append((vc, text))
     if not is_speaking:
         play_next()
+
 
 def play_next():
     global is_speaking
@@ -53,7 +60,7 @@ def play_next():
 
     try:
         filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
-        
+
         gTTS(text=text, lang="vi").save(filename)
 
         source = discord.FFmpegPCMAudio(
@@ -63,17 +70,21 @@ def play_next():
         )
 
         def after_play(err):
+            if err:
+                print("FFmpeg after_play error:", err)
+
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                print("Cleanup error:", cleanup_error)
+
             bot.loop.call_soon_threadsafe(play_next)
 
         vc.play(source, after=after_play)
 
     except Exception as e:
-        print("Lỗi TTS:", e)
+        print("Lỗi TTS:", repr(e))
         bot.loop.call_soon_threadsafe(play_next)
 
 
@@ -83,7 +94,18 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"Bot online: {bot.user} | synced {len(synced)} slash commands")
     except Exception as e:
-        print("Sync slash lỗi:", e)
+        print("Sync slash lỗi:", repr(e))
+
+
+@bot.event
+async def on_disconnect():
+    print("Bot bị ngắt kết nối Discord")
+
+
+@bot.event
+async def on_resumed():
+    print("Bot đã reconnect lại Discord")
+
 
 @bot.tree.command(name="join", description="Gọi bot vào phòng voice")
 async def join(interaction: discord.Interaction):
@@ -100,6 +122,7 @@ async def join(interaction: discord.Interaction):
         await vc.move_to(channel)
 
     await interaction.response.send_message(f"Bot đã vào {channel.name}", ephemeral=True)
+
 
 @bot.tree.command(name="noi", description="Bot nói nội dung bạn nhập")
 async def noi(interaction: discord.Interaction, text: str):
@@ -121,17 +144,20 @@ async def noi(interaction: discord.Interaction, text: str):
     add_to_queue(vc, text)
     await interaction.response.send_message("Đang tải giọng nói...", ephemeral=True)
 
+
 @bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn")
 async def auto(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = True
     await interaction.response.send_message("AUTO TTS: BẬT", ephemeral=True)
 
+
 @bot.tree.command(name="tat", description="Tắt tự động đọc")
 async def tat(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = False
     await interaction.response.send_message("AUTO TTS: TẮT", ephemeral=True)
+
 
 @bot.tree.command(name="skip", description="Bỏ câu đang đọc")
 async def skip(interaction: discord.Interaction):
@@ -141,6 +167,7 @@ async def skip(interaction: discord.Interaction):
         await interaction.response.send_message("Đã skip", ephemeral=True)
     else:
         await interaction.response.send_message("Bot không nói", ephemeral=True)
+
 
 @bot.tree.command(name="out", description="Đá bot ra khỏi voice")
 async def out(interaction: discord.Interaction):
@@ -153,21 +180,25 @@ async def out(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Bot chưa vào voice", ephemeral=True)
 
+
 @bot.tree.command(name="reset", description="Làm mới bot khi bị đơ/lag")
 async def reset_bot(interaction: discord.Interaction):
     global is_speaking, AUTO_TTS, TTS_TEXT_CHANNEL_ID
-    
+
     tts_queue.clear()
-    
     is_speaking = False
     AUTO_TTS = False
     TTS_TEXT_CHANNEL_ID = None
-    
+
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.stop()
-        
-    await interaction.response.send_message("Đã dọn dẹp hệ thống! Bot vẫn ở trong phòng, bạn có thể chat tiếp.", ephemeral=True)
+
+    await interaction.response.send_message(
+        "Đã dọn dẹp hệ thống! Bot vẫn ở trong phòng, bạn có thể chat tiếp.",
+        ephemeral=True
+    )
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -188,9 +219,19 @@ async def on_message(message: discord.Message):
 
     add_to_queue(vc, message.content)
 
+
 async def main():
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN không tồn tại hoặc đang rỗng")
+
+    print("Starting Discord bot...")
     async with bot:
         await bot.start(TOKEN)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print("BOT CRASH:", repr(e))
+        raise
