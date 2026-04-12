@@ -4,6 +4,8 @@ import uuid
 import tempfile
 import asyncio
 from collections import deque
+from threading import Thread
+from flask import Flask
 
 import discord
 from discord.ext import commands
@@ -13,6 +15,26 @@ from dotenv import load_dotenv
 print("BOT.PY STARTING...")
 
 load_dotenv()
+
+# ==========================================
+# WEB SERVER (Chống sập Render)
+# ==========================================
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot hoạt động hoàn hảo!"
+
+@app.route('/healthz')
+def healthz():
+    return "OK"
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# Khởi chạy web server ngầm ngay khi start
+Thread(target=run_server, daemon=True).start()
+# ==========================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 print("DISCORD_TOKEN exists:", bool(TOKEN))
