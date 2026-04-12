@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Xử lý định dạng xuống dòng của Windows (CRLF -> LF)
+RUN sed -i 's/\r$//' start.sh
+
 RUN chmod +x start.sh
 
 ENV PYTHONUNBUFFERED=1
