@@ -19,10 +19,12 @@ print("DISCORD_TOKEN exists:", bool(TOKEN))
 
 FFMPEG_PATH = "ffmpeg"
 GUILD_ID = 1440581960069287939
+MY_GUILD = discord.Object(id=GUILD_ID)
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -70,6 +72,7 @@ async def play_next():
             vc, text = tts_queue.popleft()
 
             if not vc or not vc.is_connected():
+                print("Skip queue item: voice client not connected")
                 continue
 
             filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
@@ -79,6 +82,7 @@ async def play_next():
                 await asyncio.wait_for(generate_tts_file(text, filename), timeout=20)
 
                 if not vc.is_connected():
+                    print("Voice disconnected before play")
                     try:
                         if os.path.exists(filename):
                             os.remove(filename)
@@ -96,18 +100,20 @@ async def play_next():
 
                 def after_play(err):
                     if err:
-                        print("FFmpeg after_play error:", err)
+                        print("FFmpeg after_play error:", repr(err))
 
                     try:
                         if os.path.exists(filename):
                             os.remove(filename)
                     except Exception as cleanup_error:
-                        print("Cleanup error:", cleanup_error)
+                        print("Cleanup error:", repr(cleanup_error))
 
                     bot.loop.call_soon_threadsafe(finished.set)
 
+                print("Start playing audio")
                 vc.play(source, after=after_play)
                 await finished.wait()
+                print("Finished playing audio")
 
             except asyncio.TimeoutError:
                 print("TTS timeout for text:", text)
@@ -131,9 +137,7 @@ async def play_next():
 @bot.event
 async def on_ready():
     try:
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
+        synced = await bot.tree.sync(guild=MY_GUILD)
         print(f"Bot online: {bot.user} | synced {len(synced)} commands (guild)")
     except Exception as e:
         print("Sync slash lỗi:", repr(e))
@@ -157,7 +161,7 @@ async def on_voice_state_update(member, before, after):
         print(f"VOICE UPDATE: {before_name} -> {after_name}")
 
 
-@bot.tree.command(name="join", description="Gọi bot vào phòng voice")
+@bot.tree.command(name="join", description="Gọi bot vào phòng voice", guild=MY_GUILD)
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("Bạn cần vào voice trước", ephemeral=True)
@@ -168,15 +172,21 @@ async def join(interaction: discord.Interaction):
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
 
-    if not vc:
-        await channel.connect()
-    elif vc.channel != channel:
-        await vc.move_to(channel)
+    try:
+        if not vc:
+            print(f"Connecting to voice: {channel.name}")
+            await channel.connect(self_deaf=True)
+        elif vc.channel != channel:
+            print(f"Moving voice: {vc.channel.name} -> {channel.name}")
+            await vc.move_to(channel)
 
-    await interaction.followup.send(f"Bot đã vào {channel.name}", ephemeral=True)
+        await interaction.followup.send(f"Bot đã vào {channel.name}", ephemeral=True)
+    except Exception as e:
+        print("JOIN ERROR:", repr(e))
+        await interaction.followup.send(f"Lỗi vào voice: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="n", description="Bot nói nội dung bạn nhập")
+@bot.tree.command(name="n", description="Bot nói nội dung bạn nhập", guild=MY_GUILD)
 async def n(interaction: discord.Interaction, text: str):
     global TTS_TEXT_CHANNEL_ID
 
@@ -190,31 +200,36 @@ async def n(interaction: discord.Interaction, text: str):
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
 
-    if not vc:
-        vc = await channel.connect()
-    elif vc.channel != channel:
-        await vc.move_to(channel)
+    try:
+        if not vc:
+            print(f"Connecting for /n: {channel.name}")
+            vc = await channel.connect(self_deaf=True)
+        elif vc.channel != channel:
+            print(f"Moving for /n: {vc.channel.name} -> {channel.name}")
+            await vc.move_to(channel)
 
-    add_to_queue(vc, text)
+        add_to_queue(vc, text)
+        await interaction.followup.send("Đang đọc...", ephemeral=True)
+    except Exception as e:
+        print("N COMMAND ERROR:", repr(e))
+        await interaction.followup.send(f"Lỗi đọc: {e}", ephemeral=True)
 
-    await interaction.followup.send("Đang đọc...", ephemeral=True)
 
-
-@bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn")
+@bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn", guild=MY_GUILD)
 async def auto(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = True
     await interaction.response.send_message("AUTO TTS: BẬT", ephemeral=True)
 
 
-@bot.tree.command(name="tat", description="Tắt tự động đọc")
+@bot.tree.command(name="tat", description="Tắt tự động đọc", guild=MY_GUILD)
 async def tat(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = False
     await interaction.response.send_message("AUTO TTS: TẮT", ephemeral=True)
 
 
-@bot.tree.command(name="skip", description="Bỏ câu đang đọc")
+@bot.tree.command(name="skip", description="Bỏ câu đang đọc", guild=MY_GUILD)
 async def skip(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
@@ -226,7 +241,7 @@ async def skip(interaction: discord.Interaction):
         await interaction.followup.send("Bot không nói", ephemeral=True)
 
 
-@bot.tree.command(name="out", description="Đá bot ra khỏi voice")
+@bot.tree.command(name="out", description="Đá bot ra khỏi voice", guild=MY_GUILD)
 async def out(interaction: discord.Interaction):
     global is_speaking
     await interaction.response.defer(ephemeral=True)
@@ -239,13 +254,17 @@ async def out(interaction: discord.Interaction):
         if vc.is_playing():
             vc.stop()
 
-        await vc.disconnect(force=True)
-        await interaction.followup.send("Bot đã thoát", ephemeral=True)
+        try:
+            await vc.disconnect(force=True)
+            await interaction.followup.send("Bot đã thoát", ephemeral=True)
+        except Exception as e:
+            print("OUT ERROR:", repr(e))
+            await interaction.followup.send(f"Lỗi thoát voice: {e}", ephemeral=True)
     else:
         await interaction.followup.send("Bot chưa vào voice", ephemeral=True)
 
 
-@bot.tree.command(name="reset", description="Làm mới bot khi bị đơ/lag")
+@bot.tree.command(name="reset", description="Làm mới bot khi bị đơ/lag", guild=MY_GUILD)
 async def reset_bot(interaction: discord.Interaction):
     global is_speaking, AUTO_TTS, TTS_TEXT_CHANNEL_ID
 
