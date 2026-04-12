@@ -8,7 +8,7 @@ import tempfile
 from flask import Flask
 from threading import Thread
 
-# WEB SERVER
+# WEB SERVER GIỮ SỐNG BOT
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is alive"
@@ -21,9 +21,12 @@ Thread(target=run, daemon=True).start()
 TOKEN = os.getenv("DISCORD_TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True # Cần thiết để kiểm tra người dùng ở phòng nào
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 speech_lock = asyncio.Lock()
+AUTO_TTS = False
+TTS_CHANNEL_ID = None
 
 @bot.event
 async def on_ready():
@@ -36,21 +39,17 @@ async def play_tts(vc, text):
         try:
             tts = gTTS(text=text, lang='vi')
             await asyncio.to_thread(tts.save, filename)
-            
             if not vc or not vc.is_connected(): return
-
-            source = discord.FFmpegPCMAudio(filename, options="-vn")
             
+            source = discord.FFmpegPCMAudio(filename, options="-vn")
             def after_playing(e):
                 if os.path.exists(filename):
                     try: os.remove(filename)
                     except: pass
-
+            
             vc.play(source, after=after_playing)
             while vc.is_playing(): await asyncio.sleep(0.2)
-                
-        except Exception as e:
-            print(f"Lỗi: {e}")
+        except Exception:
             if os.path.exists(filename):
                 try: os.remove(filename)
                 except: pass
@@ -59,37 +58,35 @@ async def play_tts(vc, text):
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
         return await interaction.response.send_message("❌ Bạn chưa vào Voice!", ephemeral=True)
-    
     await interaction.response.defer(ephemeral=True)
-    channel = interaction.user.voice.channel
     try:
         if interaction.guild.voice_client:
-            await interaction.guild.voice_client.move_to(channel)
+            await interaction.guild.voice_client.move_to(interaction.user.voice.channel)
         else:
-            await channel.connect(timeout=20.0, self_deaf=True)
-        await interaction.followup.send(f"✅ Đã vào **{channel.name}**")
+            await interaction.user.voice.channel.connect(timeout=20.0, self_deaf=True)
+        await interaction.followup.send(f"✅ Đã kết nối!")
     except Exception as e:
         await interaction.followup.send(f"Lỗi: {e}")
 
-@bot.tree.command(name="n", description="Bot nói nội dung (Riêng tư)")
+@bot.tree.command(name="n", description="Bot nói nội dung bạn nhập")
 async def n(interaction: discord.Interaction, text: str):
-    # CHỖ THAY ĐỔI: ephemeral=True giúp chỉ mình bạn thấy tin nhắn này
-    await interaction.response.send_message(f"📢 Đang nói: {text}", ephemeral=True)
-
-    if not interaction.user.voice:
-        return await interaction.followup.send("❌ Vào voice trước!", ephemeral=True)
-
+    await interaction.response.send_message(f"📢: {text}", ephemeral=True)
     vc = interaction.guild.voice_client
-    try:
-        if not vc:
-            vc = await interaction.user.voice.channel.connect(timeout=20.0, self_deaf=True)
-        elif vc.channel != interaction.user.voice.channel:
-            await vc.move_to(interaction.user.voice.channel)
-        
-        asyncio.create_task(play_tts(vc, text))
-    except Exception as e:
-        print(f"Voice Error: {e}")
-        if vc: await vc.disconnect(force=True)
+    if vc: asyncio.create_task(play_tts(vc, text))
+    else: await interaction.followup.send("❌ Bot chưa vào voice, hãy dùng /join", ephemeral=True)
+
+@bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn trong kênh này (Chỉ người cùng phòng)")
+async def auto(interaction: discord.Interaction):
+    global AUTO_TTS, TTS_CHANNEL_ID
+    AUTO_TTS = True
+    TTS_CHANNEL_ID = interaction.channel.id
+    await interaction.response.send_message("🎙️ **AUTO TTS: BẬT**\n*(Chỉ đọc tin nhắn của người ở cùng phòng với bot)*", ephemeral=True)
+
+@bot.tree.command(name="tat", description="Tắt tự động đọc tin nhắn")
+async def tat(interaction: discord.Interaction):
+    global AUTO_TTS
+    AUTO_TTS = False
+    await interaction.response.send_message("🔇 **AUTO TTS: TẮT**", ephemeral=True)
 
 @bot.tree.command(name="out", description="Cho bot thoát")
 async def out(interaction: discord.Interaction):
@@ -97,7 +94,23 @@ async def out(interaction: discord.Interaction):
     if vc:
         await vc.disconnect(force=True)
         await interaction.response.send_message("👋 Tạm biệt!", ephemeral=True)
-    else:
-        await interaction.response.send_message("Bot không trong Voice.", ephemeral=True)
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Bỏ qua nếu là bot hoặc chưa bật Auto
+    if message.author.bot or not AUTO_TTS: return
+    # Bỏ qua nếu không đúng kênh được chỉ định
+    if TTS_CHANNEL_ID and message.channel.id != TTS_CHANNEL_ID: return
+    
+    vc = message.guild.voice_client
+    # KIỂM TRA ĐIỀU KIỆN CÙNG PHÒNG
+    if vc and vc.is_connected():
+        # Nếu người chat không ở trong voice hoặc ở phòng khác với bot thì bỏ qua
+        if not message.author.voice or message.author.voice.channel != vc.channel:
+            return
+            
+        content = message.content.strip()
+        if content: 
+            asyncio.create_task(play_tts(vc, content))
 
 bot.run(TOKEN)
