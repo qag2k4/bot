@@ -4,6 +4,8 @@ import uuid
 import tempfile
 import asyncio
 from collections import deque
+from threading import Thread
+from flask import Flask
 
 import discord
 from discord.ext import commands
@@ -11,6 +13,25 @@ from gtts import gTTS
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# =======================================================
+# KHỞI TẠO WEB SERVER ẢO (GIỮ BOT SỐNG TRÊN RENDER)
+# =======================================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot đang sống và hoạt động bình thường!"
+
+def run_server():
+    # Render sẽ cấp một biến môi trường PORT, mặc định chạy port 10000 nếu không có
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+def keep_alive():
+    t = Thread(target=run_server)
+    t.start()
+# =======================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 FFMPEG_PATH = "ffmpeg"
@@ -26,13 +47,11 @@ TTS_TEXT_CHANNEL_ID = None
 tts_queue = deque()
 is_speaking = False
 
-
 def clean_text(text: str) -> str:
     text = re.sub(r"http\S+", "", text)
     text = re.sub(r"<@!?\d+>", "", text)
     text = re.sub(r"[^\w\sÀ-ỹ]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
-
 
 def add_to_queue(vc: discord.VoiceClient, text: str):
     global is_speaking
@@ -42,7 +61,6 @@ def add_to_queue(vc: discord.VoiceClient, text: str):
     tts_queue.append((vc, text))
     if not is_speaking:
         play_next()
-
 
 def play_next():
     global is_speaking
@@ -56,6 +74,8 @@ def play_next():
 
     try:
         filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
+        
+        # Tải âm thanh từ Google
         gTTS(text=text, lang="vi").save(filename)
 
         source = discord.FFmpegPCMAudio(
@@ -65,19 +85,21 @@ def play_next():
         )
 
         def after_play(err):
+            # Xóa file mp3 sau khi đọc xong để đỡ rác hệ thống
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
             except Exception:
                 pass
-
+            # Gọi lệnh đọc câu tiếp theo
             bot.loop.call_soon_threadsafe(play_next)
 
         vc.play(source, after=after_play)
 
     except Exception as e:
         print("Lỗi TTS:", e)
-        play_next()
+        # Bỏ qua lỗi và đọc câu tiếp theo
+        bot.loop.call_soon_threadsafe(play_next)
 
 
 @bot.event
@@ -87,7 +109,6 @@ async def on_ready():
         print(f"Bot online: {bot.user} | synced {len(synced)} slash commands")
     except Exception as e:
         print("Sync slash lỗi:", e)
-
 
 @bot.tree.command(name="join", description="Gọi bot vào phòng voice")
 async def join(interaction: discord.Interaction):
@@ -104,7 +125,6 @@ async def join(interaction: discord.Interaction):
         await vc.move_to(channel)
 
     await interaction.response.send_message(f"Bot đã vào {channel.name}", ephemeral=True)
-
 
 @bot.tree.command(name="noi", description="Bot nói nội dung bạn nhập")
 async def noi(interaction: discord.Interaction, text: str):
@@ -124,8 +144,7 @@ async def noi(interaction: discord.Interaction, text: str):
         await vc.move_to(channel)
 
     add_to_queue(vc, text)
-    await interaction.response.send_message("Đang đọc...", ephemeral=True)
-
+    await interaction.response.send_message("Đang tải giọng nói...", ephemeral=True)
 
 @bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn")
 async def auto(interaction: discord.Interaction):
@@ -133,13 +152,11 @@ async def auto(interaction: discord.Interaction):
     AUTO_TTS = True
     await interaction.response.send_message("AUTO TTS: BẬT", ephemeral=True)
 
-
 @bot.tree.command(name="tat", description="Tắt tự động đọc")
 async def tat(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = False
     await interaction.response.send_message("AUTO TTS: TẮT", ephemeral=True)
-
 
 @bot.tree.command(name="skip", description="Bỏ câu đang đọc")
 async def skip(interaction: discord.Interaction):
@@ -149,7 +166,6 @@ async def skip(interaction: discord.Interaction):
         await interaction.response.send_message("Đã skip", ephemeral=True)
     else:
         await interaction.response.send_message("Bot không nói", ephemeral=True)
-
 
 @bot.tree.command(name="out", description="Đá bot ra khỏi voice")
 async def out(interaction: discord.Interaction):
@@ -161,7 +177,6 @@ async def out(interaction: discord.Interaction):
         await interaction.response.send_message("Bot đã thoát", ephemeral=True)
     else:
         await interaction.response.send_message("Bot chưa vào voice", ephemeral=True)
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -182,11 +197,11 @@ async def on_message(message: discord.Message):
 
     add_to_queue(vc, message.content)
 
-
 async def main():
+    # Kích hoạt web server ảo trước khi khởi chạy bot
+    keep_alive() 
     async with bot:
         await bot.start(TOKEN)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
