@@ -1,2 +1,3 @@
 #!/bin/bash
-python -u bot.py
+# Chạy bot python
+python bot.py
