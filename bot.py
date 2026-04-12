@@ -6,27 +6,22 @@ import asyncio
 from collections import deque
 from threading import Thread
 from flask import Flask
-
 import discord
 from discord.ext import commands
 from gtts import gTTS
 from dotenv import load_dotenv
 
-print("BOT.PY STARTING...")
-
 load_dotenv()
 
 # ==========================================
-# WEB SERVER (Dành cho Render/Koyeb)
+# WEB SERVER
 # ==========================================
 app = Flask(__name__)
 @app.route('/')
-def home():
-    return "Bot hoạt động hoàn hảo!"
+def home(): return "Bot Live!"
 
 @app.route('/healthz')
-def healthz():
-    return "OK"
+def healthz(): return "OK"
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -38,188 +33,108 @@ Thread(target=run_server, daemon=True).start()
 # CẤU HÌNH BOT
 # ==========================================
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = 1440581960069287939
+GUILD_ID = 1440581960069287939 
 MY_GUILD = discord.Object(id=GUILD_ID)
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-AUTO_TTS = False
-TTS_TEXT_CHANNEL_ID = None
 tts_queue = deque()
 is_speaking = False
 
 def clean_text(text: str) -> str:
     text = re.sub(r"http\S+", "", text)
     text = re.sub(r"<@!?\d+>", "", text)
-    text = re.sub(r"[^\w\sÀ-ỹ]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
-async def generate_tts_file(text: str, filename: str):
-    def _save():
-        tts = gTTS(text=text, lang="vi")
-        tts.save(filename)
-    await asyncio.to_thread(_save)
-
-def add_to_queue(vc: discord.VoiceClient, text: str):
-    text = clean_text(text)
-    if not text:
-        return
-    tts_queue.append((vc, text))
-    # Chạy play_next nếu chưa có luồng nào đang chạy
-    if not is_speaking:
-        asyncio.create_task(play_next())
-
-async def play_next():
+async def play_next(guild_id):
     global is_speaking
-    if is_speaking or not tts_queue:
+    if not tts_queue:
+        is_speaking = False
         return
 
     is_speaking = True
+    vc, text = tts_queue.popleft()
+
+    if not vc or not vc.is_connected():
+        is_speaking = False
+        return await play_next(guild_id)
+
+    # Tạo file tạm trong thư mục /tmp của Linux
+    filename = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}.mp3")
     
     try:
-        while tts_queue:
-            vc, text = tts_queue.popleft()
+        tts = gTTS(text=text, lang="vi")
+        await asyncio.to_thread(tts.save, filename)
 
-            if not vc or not vc.is_connected():
-                continue
+        # CẤU HÌNH FFMPEG QUAN TRỌNG NHẤT
+        # Bỏ tham số executable=FFMPEG_PATH để hệ thống tự tìm trong /usr/bin/ffmpeg
+        source = discord.FFmpegPCMAudio(
+            filename,
+            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            options="-vn -filter:a 'volume=1.5'"
+        )
 
-            filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
+        def after_playing(error):
+            if error: print(f"Lỗi phát nhạc: {error}")
+            if os.path.exists(filename): os.remove(filename)
+            # Gọi câu tiếp theo trong hàng đợi
+            bot.loop.create_task(play_next(guild_id))
 
-            try:
-                await asyncio.wait_for(generate_tts_file(text, filename), timeout=15)
-                
-                if not vc.is_connected():
-                    if os.path.exists(filename): os.remove(filename)
-                    continue
+        vc.play(source, after=after_playing)
 
-                finished = asyncio.Event()
-
-                def after_play(err):
-                    if err:
-                        print(f"FFmpeg error: {err}")
-                    if os.path.exists(filename):
-                        try: os.remove(filename)
-                        except: pass
-                    bot.loop.call_soon_threadsafe(finished.set)
-
-                # Cấu hình FFmpeg tối ưu cho stream
-                source = discord.FFmpegPCMAudio(
-                    filename,
-                    options="-vn -b:a 128k"
-                )
-                
-                vc.play(source, after=after_play)
-                await finished.wait()
-
-            except Exception as e:
-                print(f"Lỗi trong khi phát TTS: {e}")
-                if os.path.exists(filename):
-                    try: os.remove(filename)
-                    except: pass
-    finally:
+    except Exception as e:
+        print(f"Lỗi TTS: {e}")
+        if os.path.exists(filename): os.remove(filename)
         is_speaking = False
+        await play_next(guild_id)
 
-# ==========================================
-# EVENTS
-# ==========================================
 @bot.event
 async def on_ready():
-    # Thử load opus nếu môi trường yêu cầu (thường Docker Linux cần)
-    if not discord.opus.is_loaded():
-        for lib in ['libopus.so.0', 'libopus.so', 'opus']:
-            try:
-                discord.opus.load_opus(lib)
-                print(f"Opus loaded using {lib}")
-                break
-            except:
-                continue
-    
-    try:
-        synced = await bot.tree.sync(guild=MY_GUILD)
-        print(f"Bot online: {bot.user} | Đã sync {len(synced)} lệnh.")
-    except Exception as e:
-        print(f"Sync error: {e}")
+    # Không cần load_opus thủ công vì Dockerfile đã cài libopus0
+    await bot.tree.sync(guild=MY_GUILD)
+    print(f"Bot Online: {bot.user}")
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if member.id == bot.user.id and before.channel and not after.channel:
-        global is_speaking, tts_queue
-        tts_queue.clear()
-        is_speaking = False
-
-# ==========================================
-# SLASH COMMANDS
-# ==========================================
-@bot.tree.command(name="join", description="Gọi bot vào phòng voice", guild=MY_GUILD)
-async def join(interaction: discord.Interaction):
-    if not interaction.user.voice:
-        return await interaction.response.send_message("Vào voice đi rồi gọi!", ephemeral=True)
-    
-    await interaction.response.defer(ephemeral=True)
-    channel = interaction.user.voice.channel
-    try:
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.move_to(channel)
-        else:
-            await channel.connect(self_deaf=True)
-        await interaction.followup.send(f"Đã vào {channel.name}")
-    except Exception as e:
-        await interaction.followup.send(f"Lỗi: {e}")
-
-@bot.tree.command(name="n", description="Bot nói nội dung bạn nhập", guild=MY_GUILD)
+@bot.tree.command(name="n", description="Nói văn bản", guild=MY_GUILD)
 async def n(interaction: discord.Interaction, text: str):
     if not interaction.user.voice:
-        return await interaction.response.send_message("Bạn phải ở trong Voice!", ephemeral=True)
+        return await interaction.response.send_message("Bạn chưa vào Voice!", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
     
-    guild = interaction.guild
-    vc = guild.voice_client
-
+    vc = interaction.guild.voice_client
     if not vc:
         vc = await interaction.user.voice.channel.connect(self_deaf=True)
     elif vc.channel != interaction.user.voice.channel:
         await vc.move_to(interaction.user.voice.channel)
 
-    add_to_queue(vc, text)
-    await interaction.followup.send(f"Đã thêm vào hàng đợi: {text[:20]}...")
+    content = clean_text(text)
+    if content:
+        tts_queue.append((vc, content))
+        if not is_speaking:
+            await play_next(interaction.guild.id)
+        await interaction.followup.send(f"Đã nhận: {content[:20]}...")
+    else:
+        await interaction.followup.send("Nội dung trống!")
 
 @bot.tree.command(name="out", description="Thoát voice", guild=MY_GUILD)
 async def out(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
         await vc.disconnect()
-        await interaction.response.send_message("Tạm biệt!")
+        global is_speaking
+        is_speaking = False
+        tts_queue.clear()
+        await interaction.response.send_message("Đã thoát!")
     else:
-        await interaction.response.send_message("Bot có ở trong phòng nào đâu?")
-
-@bot.tree.command(name="skip", description="Bỏ qua câu hiện tại", guild=MY_GUILD)
-async def skip(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and vc.is_playing():
-        vc.stop()
-        await interaction.response.send_message("Đã skip!")
-    else:
-        await interaction.response.send_message("Đang không nói gì cả.")
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not AUTO_TTS: return
-    vc = message.guild.voice_client
-    if vc and message.author.voice and message.author.voice.channel == vc.channel:
-        add_to_queue(vc, message.content)
+        await interaction.response.send_message("Bot không ở trong voice.")
 
 async def main():
     async with bot:
         await bot.start(TOKEN)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
