@@ -79,8 +79,11 @@ async def play_next():
                 await asyncio.wait_for(generate_tts_file(text, filename), timeout=20)
 
                 if not vc.is_connected():
-                    if os.path.exists(filename):
-                        os.remove(filename)
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
                     continue
 
                 finished = asyncio.Event()
@@ -129,7 +132,7 @@ async def play_next():
 async def on_ready():
     try:
         guild = discord.Object(id=GUILD_ID)
-        bot.tree.clear_commands(guild=guild)
+        bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         print(f"Bot online: {bot.user} | synced {len(synced)} commands (guild)")
     except Exception as e:
@@ -144,6 +147,14 @@ async def on_disconnect():
 @bot.event
 async def on_resumed():
     print("Bot đã reconnect lại Discord")
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if bot.user and member.id == bot.user.id:
+        before_name = before.channel.name if before.channel else None
+        after_name = after.channel.name if after.channel else None
+        print(f"VOICE UPDATE: {before_name} -> {after_name}")
 
 
 @bot.tree.command(name="join", description="Gọi bot vào phòng voice")
