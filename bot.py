@@ -39,53 +39,87 @@ def clean_text(text: str) -> str:
 
 
 def add_to_queue(vc: discord.VoiceClient, text: str):
-    global is_speaking
     text = clean_text(text)
     if not text:
         return
     tts_queue.append((vc, text))
-    if not is_speaking:
-        play_next()
+    asyncio.create_task(play_next())
 
 
-def play_next():
+async def generate_tts_file(text: str, filename: str):
+    def _save():
+        gTTS(text=text, lang="vi").save(filename)
+
+    await asyncio.to_thread(_save)
+
+
+async def play_next():
     global is_speaking
 
+    if is_speaking:
+        return
+
     if not tts_queue:
-        is_speaking = False
         return
 
     is_speaking = True
-    vc, text = tts_queue.popleft()
 
     try:
-        filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
+        while tts_queue:
+            vc, text = tts_queue.popleft()
 
-        gTTS(text=text, lang="vi").save(filename)
+            if not vc or not vc.is_connected():
+                continue
 
-        source = discord.FFmpegPCMAudio(
-            filename,
-            executable=FFMPEG_PATH,
-            options="-vn"
-        )
-
-        def after_play(err):
-            if err:
-                print("FFmpeg after_play error:", err)
+            filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
 
             try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-            except Exception as cleanup_error:
-                print("Cleanup error:", cleanup_error)
+                print("Generating TTS:", text)
+                await asyncio.wait_for(generate_tts_file(text, filename), timeout=20)
 
-            bot.loop.call_soon_threadsafe(play_next)
+                if not vc.is_connected():
+                    continue
 
-        vc.play(source, after=after_play)
+                finished = asyncio.Event()
 
-    except Exception as e:
-        print("Lỗi TTS:", repr(e))
-        bot.loop.call_soon_threadsafe(play_next)
+                source = discord.FFmpegPCMAudio(
+                    filename,
+                    executable=FFMPEG_PATH,
+                    options="-vn"
+                )
+
+                def after_play(err):
+                    if err:
+                        print("FFmpeg after_play error:", err)
+
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception as cleanup_error:
+                        print("Cleanup error:", cleanup_error)
+
+                    bot.loop.call_soon_threadsafe(finished.set)
+
+                vc.play(source, after=after_play)
+                await finished.wait()
+
+            except asyncio.TimeoutError:
+                print("TTS timeout for text:", text)
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+            except Exception as e:
+                print("Lỗi TTS:", repr(e))
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+
+    finally:
+        is_speaking = False
 
 
 @bot.event
@@ -113,6 +147,8 @@ async def join(interaction: discord.Interaction):
         await interaction.response.send_message("Bạn cần vào voice trước", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True)
+
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
 
@@ -121,10 +157,10 @@ async def join(interaction: discord.Interaction):
     elif vc.channel != channel:
         await vc.move_to(channel)
 
-    await interaction.response.send_message(f"Bot đã vào {channel.name}", ephemeral=True)
+    await interaction.followup.send(f"Bot đã vào {channel.name}", ephemeral=True)
 
 
-@bot.tree.command(name="noi", description="Bot nói nội dung bạn nhập")
+@bot.tree.command(name="n", description="Bot nói nội dung bạn nhập")
 async def noi(interaction: discord.Interaction, text: str):
     global TTS_TEXT_CHANNEL_ID
 
@@ -164,31 +200,40 @@ async def tat(interaction: discord.Interaction):
 
 @bot.tree.command(name="skip", description="Bỏ câu đang đọc")
 async def skip(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.stop()
-        await interaction.response.send_message("Đã skip", ephemeral=True)
+        await interaction.followup.send("Đã skip", ephemeral=True)
     else:
-        await interaction.response.send_message("Bot không nói", ephemeral=True)
+        await interaction.followup.send("Bot không nói", ephemeral=True)
 
 
 @bot.tree.command(name="out", description="Đá bot ra khỏi voice")
 async def out(interaction: discord.Interaction):
     global is_speaking
+    await interaction.response.defer(ephemeral=True)
+
     vc = interaction.guild.voice_client
     if vc:
         tts_queue.clear()
         is_speaking = False
-        vc.stop()
+
+        if vc.is_playing():
+            vc.stop()
+
         await vc.disconnect(force=True)
-        await interaction.response.send_message("Bot đã thoát", ephemeral=True)
+        await interaction.followup.send("Bot đã thoát", ephemeral=True)
     else:
-        await interaction.response.send_message("Bot chưa vào voice", ephemeral=True)
+        await interaction.followup.send("Bot chưa vào voice", ephemeral=True)
 
 
 @bot.tree.command(name="reset", description="Làm mới bot khi bị đơ/lag")
 async def reset_bot(interaction: discord.Interaction):
     global is_speaking, AUTO_TTS, TTS_TEXT_CHANNEL_ID
+
+    await interaction.response.defer(ephemeral=True)
 
     tts_queue.clear()
     is_speaking = False
@@ -199,7 +244,7 @@ async def reset_bot(interaction: discord.Interaction):
     if vc and vc.is_playing():
         vc.stop()
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         "Đã dọn dẹp hệ thống! Bot vẫn ở trong phòng, bạn có thể chat tiếp.",
         ephemeral=True
     )
