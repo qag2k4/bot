@@ -1,4 +1,2 @@
-#!/usr/bin/env bash
-set -x
-python -u web.py &
+#!/bin/bash
 python -u bot.py
