@@ -30,6 +30,7 @@ def healthz():
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
+    # Chạy Flask ở chế độ yên tĩnh, không làm nghẽn luồng
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # Khởi chạy web server ngầm ngay khi start
@@ -40,6 +41,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 print("DISCORD_TOKEN exists:", bool(TOKEN))
 
 FFMPEG_PATH = "ffmpeg"
+
+# LƯU Ý: GUILD ID (Server Ryūjin của bạn)
 GUILD_ID = 1440581960069287939
 MY_GUILD = discord.Object(id=GUILD_ID)
 
@@ -74,7 +77,6 @@ def add_to_queue(vc: discord.VoiceClient, text: str):
 async def generate_tts_file(text: str, filename: str):
     def _save():
         gTTS(text=text, lang="vi").save(filename)
-
     await asyncio.to_thread(_save)
 
 
@@ -159,8 +161,16 @@ async def play_next():
 @bot.event
 async def on_ready():
     try:
+        # BƯỚC QUAN TRỌNG NHẤT: Ép Discord xóa sạch các lệnh ảo/lệnh trùng bị kẹt
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync(guild=None)
+        
+        # CHỈ đồng bộ lệnh chuẩn vào Server của bạn
         synced = await bot.tree.sync(guild=MY_GUILD)
-        print(f"Bot online: {bot.user} | synced {len(synced)} commands (guild)")
+        print("=========================================")
+        print(f"Bot online: {bot.user}")
+        print(f"ĐÃ DỌN RÁC VÀ ĐỒNG BỘ {len(synced)} LỆNH CHUẨN!")
+        print("=========================================")
     except Exception as e:
         print("Sync slash lỗi:", repr(e))
 
