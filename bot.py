@@ -17,7 +17,7 @@ print("BOT.PY STARTING...")
 load_dotenv()
 
 # ==========================================
-# WEB SERVER (Chống sập Render)
+# WEB SERVER (Dành cho Render/Koyeb)
 # ==========================================
 app = Flask(__name__)
 @app.route('/')
@@ -33,12 +33,11 @@ def run_server():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 Thread(target=run_server, daemon=True).start()
+
 # ==========================================
-
+# CẤU HÌNH BOT
+# ==========================================
 TOKEN = os.getenv("DISCORD_TOKEN")
-print("DISCORD_TOKEN exists:", bool(TOKEN))
-
-FFMPEG_PATH = "ffmpeg"
 GUILD_ID = 1440581960069287939
 MY_GUILD = discord.Object(id=GUILD_ID)
 
@@ -60,272 +59,167 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[^\w\sÀ-ỹ]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
+async def generate_tts_file(text: str, filename: str):
+    def _save():
+        tts = gTTS(text=text, lang="vi")
+        tts.save(filename)
+    await asyncio.to_thread(_save)
+
 def add_to_queue(vc: discord.VoiceClient, text: str):
     text = clean_text(text)
     if not text:
         return
     tts_queue.append((vc, text))
-    asyncio.create_task(play_next())
-
-async def generate_tts_file(text: str, filename: str):
-    def _save():
-        gTTS(text=text, lang="vi").save(filename)
-    await asyncio.to_thread(_save)
+    # Chạy play_next nếu chưa có luồng nào đang chạy
+    if not is_speaking:
+        asyncio.create_task(play_next())
 
 async def play_next():
     global is_speaking
-
-    if is_speaking:
-        return
-    if not tts_queue:
+    if is_speaking or not tts_queue:
         return
 
     is_speaking = True
-
+    
     try:
         while tts_queue:
             vc, text = tts_queue.popleft()
 
             if not vc or not vc.is_connected():
-                print("Skip queue item: voice client not connected")
                 continue
 
             filename = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.mp3")
 
             try:
-                print("Generating TTS:", text)
-                await asyncio.wait_for(generate_tts_file(text, filename), timeout=20)
-
+                await asyncio.wait_for(generate_tts_file(text, filename), timeout=15)
+                
                 if not vc.is_connected():
-                    print("Voice disconnected before play")
-                    try:
-                        if os.path.exists(filename):
-                            os.remove(filename)
-                    except Exception:
-                        pass
+                    if os.path.exists(filename): os.remove(filename)
                     continue
 
                 finished = asyncio.Event()
 
-                # VÁ LỖI FFMPEG BẰNG BEFORE_OPTIONS
-                ffmpeg_options = {
-                    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                    'options': '-vn'
-                }
-                source = discord.FFmpegPCMAudio(filename, executable=FFMPEG_PATH, **ffmpeg_options)
-
                 def after_play(err):
                     if err:
-                        print("FFmpeg after_play error:", repr(err))
-                    try:
-                        if os.path.exists(filename):
-                            os.remove(filename)
-                    except Exception:
-                        pass
+                        print(f"FFmpeg error: {err}")
+                    if os.path.exists(filename):
+                        try: os.remove(filename)
+                        except: pass
                     bot.loop.call_soon_threadsafe(finished.set)
 
-                print("Start playing audio")
+                # Cấu hình FFmpeg tối ưu cho stream
+                source = discord.FFmpegPCMAudio(
+                    filename,
+                    options="-vn -b:a 128k"
+                )
+                
                 vc.play(source, after=after_play)
                 await finished.wait()
-                print("Finished playing audio")
 
-            except asyncio.TimeoutError:
-                print("TTS timeout for text:", text)
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception:
-                    pass
             except Exception as e:
-                print("Lỗi TTS:", repr(e))
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception:
-                    pass
+                print(f"Lỗi trong khi phát TTS: {e}")
+                if os.path.exists(filename):
+                    try: os.remove(filename)
+                    except: pass
     finally:
         is_speaking = False
 
+# ==========================================
+# EVENTS
+# ==========================================
 @bot.event
 async def on_ready():
+    # Thử load opus nếu môi trường yêu cầu (thường Docker Linux cần)
     if not discord.opus.is_loaded():
-        try:
-            discord.opus.load_opus('libopus.so.0')
-            print("=> Đã tải thành công thư viện âm thanh Opus!")
-        except Exception as e:
-            print("=> Cảnh báo: Không thể tải thủ công Opus:", e)
-
+        for lib in ['libopus.so.0', 'libopus.so', 'opus']:
+            try:
+                discord.opus.load_opus(lib)
+                print(f"Opus loaded using {lib}")
+                break
+            except:
+                continue
+    
     try:
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync(guild=None)
         synced = await bot.tree.sync(guild=MY_GUILD)
-        print("=========================================")
-        print(f"Bot online: {bot.user}")
-        print(f"ĐÃ KIẾN TRÚC LẠI LUỒNG ASYNC & VÁ LỖI {len(synced)} LỆNH!")
-        print("=========================================")
+        print(f"Bot online: {bot.user} | Đã sync {len(synced)} lệnh.")
     except Exception as e:
-        print("Sync slash lỗi:", repr(e))
-
-@bot.event
-async def on_disconnect():
-    print("Bot bị ngắt kết nối Discord")
-
-@bot.event
-async def on_resumed():
-    print("Bot đã reconnect lại Discord")
+        print(f"Sync error: {e}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if bot.user and member.id == bot.user.id:
-        before_name = before.channel.name if before.channel else None
-        after_name = after.channel.name if after.channel else None
-        print(f"VOICE UPDATE: {before_name} -> {after_name}")
+    if member.id == bot.user.id and before.channel and not after.channel:
+        global is_speaking, tts_queue
+        tts_queue.clear()
+        is_speaking = False
 
-        if before.channel and not after.channel:
-            vc = member.guild.voice_client
-            if vc:
-                try:
-                    await vc.disconnect(force=True)
-                except:
-                    pass
-            global is_speaking, tts_queue
-            tts_queue.clear()
-            is_speaking = False
-
-# HÀM XỬ LÝ BACKGROUND ĐỂ CHỐNG LỖI "KHÔNG PHẢN HỒI"
-async def connect_voice_background(channel, guild):
-    try:
-        vc = guild.voice_client
-        if not vc:
-            print(f"Background Task: Connecting to {channel.name}")
-            await channel.connect(self_deaf=True)
-        elif vc.channel != channel:
-            await vc.move_to(channel)
-    except Exception as e:
-        print(f"Background Connect Error: {e}")
-
+# ==========================================
+# SLASH COMMANDS
+# ==========================================
 @bot.tree.command(name="join", description="Gọi bot vào phòng voice", guild=MY_GUILD)
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
-        await interaction.response.send_message("Bạn cần vào phòng voice trước!", ephemeral=True)
-        return
-
-    # Trả lời NGAY LẬP TỨC để Discord không báo đỏ
-    await interaction.response.send_message("Đang tiến hành kết nối...", ephemeral=True)
+        return await interaction.response.send_message("Vào voice đi rồi gọi!", ephemeral=True)
     
-    # Ném việc kết nối (chậm) sang một luồng ngầm
-    asyncio.create_task(connect_voice_background(interaction.user.voice.channel, interaction.guild))
-
+    await interaction.response.defer(ephemeral=True)
+    channel = interaction.user.voice.channel
+    try:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.move_to(channel)
+        else:
+            await channel.connect(self_deaf=True)
+        await interaction.followup.send(f"Đã vào {channel.name}")
+    except Exception as e:
+        await interaction.followup.send(f"Lỗi: {e}")
 
 @bot.tree.command(name="n", description="Bot nói nội dung bạn nhập", guild=MY_GUILD)
 async def n(interaction: discord.Interaction, text: str):
-    global TTS_TEXT_CHANNEL_ID
-
     if not interaction.user.voice:
-        await interaction.response.send_message("Bạn cần vào phòng voice trước!", ephemeral=True)
-        return
+        return await interaction.response.send_message("Bạn phải ở trong Voice!", ephemeral=True)
 
-    # Trả lời NGAY LẬP TỨC
-    await interaction.response.send_message("Đã nhận lệnh, đang tải giọng nói...", ephemeral=True)
-    
-    TTS_TEXT_CHANNEL_ID = interaction.channel.id
-    channel = interaction.user.voice.channel
-    
-    # Tạo một hàm con chạy ngầm để xử lý vừa connect vừa đọc
-    async def process_n_background():
-        try:
-            vc = interaction.guild.voice_client
-            if not vc:
-                print(f"Background Task (/n): Connecting to {channel.name}")
-                vc = await channel.connect(self_deaf=True)
-            elif vc.channel != channel:
-                await vc.move_to(channel)
-                
-            add_to_queue(vc, text)
-        except Exception as e:
-            print(f"Background Error in /n: {e}")
-
-    # Đẩy vào luồng ngầm
-    asyncio.create_task(process_n_background())
-
-
-@bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn", guild=MY_GUILD)
-async def auto(interaction: discord.Interaction):
-    global AUTO_TTS
-    AUTO_TTS = True
-    await interaction.response.send_message("AUTO TTS: BẬT", ephemeral=True)
-
-@bot.tree.command(name="tat", description="Tắt tự động đọc", guild=MY_GUILD)
-async def tat(interaction: discord.Interaction):
-    global AUTO_TTS
-    AUTO_TTS = False
-    await interaction.response.send_message("AUTO TTS: TẮT", ephemeral=True)
-
-@bot.tree.command(name="skip", description="Bỏ câu đang đọc", guild=MY_GUILD)
-async def skip(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    vc = interaction.guild.voice_client
-    if vc and vc.is_playing():
-        vc.stop()
-        await interaction.followup.send("Đã skip", ephemeral=True)
-    else:
-        await interaction.followup.send("Bot không nói", ephemeral=True)
+    
+    guild = interaction.guild
+    vc = guild.voice_client
 
-@bot.tree.command(name="out", description="Đá bot ra khỏi voice", guild=MY_GUILD)
+    if not vc:
+        vc = await interaction.user.voice.channel.connect(self_deaf=True)
+    elif vc.channel != interaction.user.voice.channel:
+        await vc.move_to(interaction.user.voice.channel)
+
+    add_to_queue(vc, text)
+    await interaction.followup.send(f"Đã thêm vào hàng đợi: {text[:20]}...")
+
+@bot.tree.command(name="out", description="Thoát voice", guild=MY_GUILD)
 async def out(interaction: discord.Interaction):
-    global is_speaking
-    await interaction.response.defer(ephemeral=True)
     vc = interaction.guild.voice_client
     if vc:
-        tts_queue.clear()
-        is_speaking = False
-        if vc.is_playing():
-            vc.stop()
-        try:
-            await vc.disconnect(force=True)
-            await interaction.followup.send("Bot đã thoát", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"Lỗi thoát voice: {e}", ephemeral=True)
+        await vc.disconnect()
+        await interaction.response.send_message("Tạm biệt!")
     else:
-        await interaction.followup.send("Bot chưa vào voice", ephemeral=True)
+        await interaction.response.send_message("Bot có ở trong phòng nào đâu?")
 
-@bot.tree.command(name="reset", description="Làm mới bot khi bị đơ/lag", guild=MY_GUILD)
-async def reset_bot(interaction: discord.Interaction):
-    global is_speaking, AUTO_TTS, TTS_TEXT_CHANNEL_ID
-    await interaction.response.defer(ephemeral=True)
-    tts_queue.clear()
-    is_speaking = False
-    AUTO_TTS = False
-    TTS_TEXT_CHANNEL_ID = None
+@bot.tree.command(name="skip", description="Bỏ qua câu hiện tại", guild=MY_GUILD)
+async def skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
         vc.stop()
-    await interaction.followup.send("Đã dọn dẹp hệ thống! Bot vẫn ở trong phòng.", ephemeral=True)
+        await interaction.response.send_message("Đã skip!")
+    else:
+        await interaction.response.send_message("Đang không nói gì cả.")
 
 @bot.event
 async def on_message(message: discord.Message):
-    await bot.process_commands(message)
-    if message.author.bot or not AUTO_TTS:
-        return
-    if not message.guild or not message.content.strip():
-        return
-    if TTS_TEXT_CHANNEL_ID and message.channel.id != TTS_TEXT_CHANNEL_ID:
-        return
+    if message.author.bot or not AUTO_TTS: return
     vc = message.guild.voice_client
-    if not vc or not message.author.voice or message.author.voice.channel != vc.channel:
-        return
-    add_to_queue(vc, message.content)
+    if vc and message.author.voice and message.author.voice.channel == vc.channel:
+        add_to_queue(vc, message.content)
 
 async def main():
-    if not TOKEN:
-        raise RuntimeError("DISCORD_TOKEN không tồn tại hoặc đang rỗng")
-    print("Starting Discord bot...")
     async with bot:
         await bot.start(TOKEN)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
-        print("BOT CRASH:", repr(e))
-        raise
+    except KeyboardInterrupt:
+        pass
