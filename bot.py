@@ -18,6 +18,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 print("DISCORD_TOKEN exists:", bool(TOKEN))
 
 FFMPEG_PATH = "ffmpeg"
+GUILD_ID = 1440581960069287939
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -78,6 +79,8 @@ async def play_next():
                 await asyncio.wait_for(generate_tts_file(text, filename), timeout=20)
 
                 if not vc.is_connected():
+                    if os.path.exists(filename):
+                        os.remove(filename)
                     continue
 
                 finished = asyncio.Event()
@@ -125,8 +128,10 @@ async def play_next():
 @bot.event
 async def on_ready():
     try:
-        synced = await bot.tree.sync()
-        print(f"Bot online: {bot.user} | synced {len(synced)} slash commands")
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.clear_commands(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Bot online: {bot.user} | synced {len(synced)} commands (guild)")
     except Exception as e:
         print("Sync slash lỗi:", repr(e))
 
@@ -161,7 +166,7 @@ async def join(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="n", description="Bot nói nội dung bạn nhập")
-async def noi(interaction: discord.Interaction, text: str):
+async def n(interaction: discord.Interaction, text: str):
     global TTS_TEXT_CHANNEL_ID
 
     if not interaction.user.voice:
