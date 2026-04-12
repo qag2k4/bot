@@ -132,6 +132,8 @@ async def noi(interaction: discord.Interaction, text: str):
         await interaction.response.send_message("Bạn cần vào voice trước", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True)
+
     TTS_TEXT_CHANNEL_ID = interaction.channel.id
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
@@ -142,7 +144,8 @@ async def noi(interaction: discord.Interaction, text: str):
         await vc.move_to(channel)
 
     add_to_queue(vc, text)
-    await interaction.response.send_message("Đang tải giọng nói...", ephemeral=True)
+
+    await interaction.followup.send("Đang đọc...", ephemeral=True)
 
 
 @bot.tree.command(name="auto", description="Bật tự động đọc tin nhắn")
@@ -171,9 +174,11 @@ async def skip(interaction: discord.Interaction):
 
 @bot.tree.command(name="out", description="Đá bot ra khỏi voice")
 async def out(interaction: discord.Interaction):
+    global is_speaking
     vc = interaction.guild.voice_client
     if vc:
         tts_queue.clear()
+        is_speaking = False
         vc.stop()
         await vc.disconnect(force=True)
         await interaction.response.send_message("Bot đã thoát", ephemeral=True)
