@@ -8,7 +8,7 @@ import tempfile
 from flask import Flask
 from threading import Thread
 
-# WEB SERVER GIỮ SỐNG BOT
+# WEB SERVER
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is alive"
@@ -71,10 +71,10 @@ async def join(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Lỗi: {e}")
 
-@bot.tree.command(name="n", description="Bot nói nội dung")
+@bot.tree.command(name="n", description="Bot nói nội dung (Riêng tư)")
 async def n(interaction: discord.Interaction, text: str):
-    # Thay thế dòng chữ dài bằng icon cái loa và nội dung
-    await interaction.response.send_message(f"📢: {text}", ephemeral=False)
+    # CHỖ THAY ĐỔI: ephemeral=True giúp chỉ mình bạn thấy tin nhắn này
+    await interaction.response.send_message(f"📢 Đang nói: {text}", ephemeral=True)
 
     if not interaction.user.voice:
         return await interaction.followup.send("❌ Vào voice trước!", ephemeral=True)
@@ -96,7 +96,7 @@ async def out(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
         await vc.disconnect(force=True)
-        await interaction.response.send_message("👋 Tạm biệt!")
+        await interaction.response.send_message("👋 Tạm biệt!", ephemeral=True)
     else:
         await interaction.response.send_message("Bot không trong Voice.", ephemeral=True)
 
