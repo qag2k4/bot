@@ -3,10 +3,10 @@ import asyncio
 import discord
 from discord.ext import commands
 from gtts import gTTS
-import uuid
 import tempfile
 from flask import Flask
 from threading import Thread
+import sys
 
 # ==========================================
 # CONFIG
@@ -15,7 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1440581960069287939
 
 # ==========================================
-# WEB SERVER (Render Web Service)
+# WEB SERVER (Giữ cho Render không ngủ)
 # ==========================================
 app = Flask(__name__)
 
@@ -27,256 +27,162 @@ def home():
 def healthz():
     return "OK", 200
 
-
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Web chạy ở port {port}")
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
-
+    # Giảm tải log cho Render
+    import logging
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+    app.run(host="0.0.0.0", port=port)
 
 # ==========================================
-# DISCORD BOT
+# DISCORD BOT - Tối ưu kết nối
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Tăng cường khả năng kết nối lại khi gặp lỗi mạng
+bot = commands.Bot(
+    command_prefix="!", 
+    intents=intents,
+    heartbeat_timeout=60.0,
+    guild_ready_timeout=20.0
+)
 
-speech_lock = asyncio.Lock()
-voice_lock = asyncio.Lock()
-
-AUTO_TTS = False
-TTS_CHANNEL_ID = None
-last_tts_time = {}
+# Trạng thái toàn cục
+state = {
+    "AUTO_TTS": False,
+    "TTS_CHANNEL_ID": None,
+    "last_tts_time": {}
+}
 
 # ==========================================
-# HÀM PHỤ
+# XỬ LÝ VOICE & TTS
 # ==========================================
-async def cleanup_voice(guild: discord.Guild):
-    vc = guild.voice_client
-    if vc:
-        try:
-            await vc.disconnect(force=True)
-        except Exception as e:
-            print("CLEANUP VOICE ERROR:", repr(e))
-
-
-async def ensure_voice(interaction: discord.Interaction):
-    async with voice_lock:
-        if not interaction.user.voice or not interaction.user.voice.channel:
-            return None, "❌ Bạn chưa vào Voice!"
-
-        channel = interaction.user.voice.channel
-        vc = interaction.guild.voice_client
-
-        try:
-            if vc and vc.is_connected():
-                if vc.channel and vc.channel.id == channel.id:
-                    return vc, None
-
-                await vc.move_to(channel)
-                return interaction.guild.voice_client, None
-
-            if vc and not vc.is_connected():
-                await cleanup_voice(interaction.guild)
-
-            vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True)
-            return vc, None
-
-        except Exception as e:
-            print("ENSURE VOICE ERROR:", repr(e))
-            await cleanup_voice(interaction.guild)
-            return None, f"❌ Lỗi voice: {type(e).__name__}: {e}"
-
-
 async def play_tts(vc, text):
-    async with speech_lock:
-        filename = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.mp3")
-
-        try:
-            if len(text) > 200:
-                text = text[:200]
-
-            tts = gTTS(text=text, lang='vi')
-            await asyncio.to_thread(tts.save, filename)
-
-            if not vc or not vc.is_connected():
-                return
-
-            while vc.is_playing() or vc.is_paused():
-                await asyncio.sleep(0.2)
-
-            source = discord.FFmpegPCMAudio(filename, options="-vn")
-
-            def after_playing(error):
-                if error:
-                    print("PLAYBACK ERROR:", repr(error))
-                if os.path.exists(filename):
-                    try:
-                        os.remove(filename)
-                    except Exception:
-                        pass
-
-            vc.play(source, after=after_playing)
-
-            while vc.is_playing():
-                await asyncio.sleep(0.2)
-
-        except Exception as e:
-            print("PLAY TTS ERROR:", repr(e))
-            if os.path.exists(filename):
-                try:
-                    os.remove(filename)
-                except Exception:
-                    pass
-
-
-# ==========================================
-# EVENT
-# ==========================================
-@bot.event
-async def on_ready():
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"⚡ Sync {len(synced)} commands trong guild")
-    except Exception as e:
-        print("SYNC ERROR:", repr(e))
-
-    print(f"✅ Bot online: {bot.user}")
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    vc = member.guild.voice_client
-    if not vc or not vc.channel:
-        return
-
-    if before.channel and vc.channel and before.channel.id == vc.channel.id:
-        humans = [m for m in vc.channel.members if not m.bot]
-
-        if len(humans) == 0:
-            await asyncio.sleep(60)
-
-            vc = member.guild.voice_client
-            if not vc or not vc.channel:
-                return
-
-            humans = [m for m in vc.channel.members if not m.bot]
-            if len(humans) == 0:
-                try:
-                    await vc.disconnect(force=True)
-                    print("🔌 Tự out vì phòng trống")
-                except Exception as e:
-                    print("AUTO DISCONNECT ERROR:", repr(e))
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    global AUTO_TTS, TTS_CHANNEL_ID, last_tts_time
-
-    if message.author.bot or not AUTO_TTS:
-        return
-
-    if TTS_CHANNEL_ID and message.channel.id != TTS_CHANNEL_ID:
-        return
-
-    if not message.guild:
-        return
-
-    vc = message.guild.voice_client
     if not vc or not vc.is_connected():
         return
 
-    if not message.author.voice or message.author.voice.channel != vc.channel:
-        return
+    # Tạo file tạm an toàn
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+        filename = fp.name
 
-    content = message.content.strip()
-    if not content:
-        return
+    try:
+        if len(text) > 200: text = text[:200]
+        
+        tts = gTTS(text=text, lang='vi')
+        await asyncio.to_thread(tts.save, filename)
 
-    now = asyncio.get_event_loop().time()
-    uid = message.author.id
+        # Chống chồng chéo âm thanh
+        while vc.is_playing():
+            await asyncio.sleep(0.1)
 
-    if uid in last_tts_time and now - last_tts_time[uid] < 2:
-        return
-
-    last_tts_time[uid] = now
-
-    await play_tts(vc, content)
-
+        source = discord.FFmpegPCMAudio(filename)
+        
+        def cleanup(error):
+            if os.path.exists(filename):
+                try: os.remove(filename)
+                except: pass
+        
+        vc.play(source, after=cleanup)
+    except Exception as e:
+        print(f"Lỗi phát nhạc: {e}")
+        if os.path.exists(filename): os.remove(filename)
 
 # ==========================================
-# SLASH COMMAND (GUILD)
+# EVENTS
 # ==========================================
-GUILD_OBJ = discord.Object(id=GUILD_ID)
+@bot.event
+async def on_ready():
+    print(f"✅ Đã đăng nhập: {bot.user}")
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"⚡ Đã đồng bộ {len(synced)} lệnh Slash")
+    except Exception as e:
+        print(f"Lỗi sync: {e}")
 
+@bot.event
+async def on_message(message):
+    if message.author.bot or not state["AUTO_TTS"]: return
+    if state["TTS_CHANNEL_ID"] and message.channel.id != state["TTS_CHANNEL_ID"]: return
+    
+    vc = message.guild.voice_client
+    if vc and vc.is_connected() and message.author.voice and message.author.voice.channel.id == vc.channel.id:
+        # Chống spam nhẹ (1 giây mỗi câu)
+        now = asyncio.get_event_loop().time()
+        if now - state["last_tts_time"].get(message.author.id, 0) < 1: return
+        state["last_tts_time"][message.author.id] = now
+        
+        await play_tts(vc, message.content)
 
-@bot.tree.command(name="join", guild=GUILD_OBJ)
+# ==========================================
+# SLASH COMMANDS
+# ==========================================
+@bot.tree.command(name="join", guild=discord.Object(id=GUILD_ID))
 async def join(interaction: discord.Interaction):
+    if not interaction.user.voice:
+        return await interaction.response.send_message("❌ Bạn không ở trong voice!", ephemeral=True)
+    
     await interaction.response.defer(ephemeral=True)
+    channel = interaction.user.voice.channel
+    try:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.move_to(channel)
+        else:
+            await channel.connect(self_deaf=True)
+        await interaction.followup.send(f"✅ Đã vào {channel.name}")
+    except Exception as e:
+        await interaction.followup.send(f"Lỗi kết nối: {e}")
 
-    vc, err = await ensure_voice(interaction)
-    if err:
-        return await interaction.followup.send(err)
-
-    await interaction.followup.send(f"✅ Đã vào {vc.channel.name}")
-
-
-@bot.tree.command(name="n", guild=GUILD_OBJ)
-async def n(interaction: discord.Interaction, text: str):
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        return await interaction.response.send_message("❌ Bạn chưa vào Voice!", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True)
-
-    vc, err = await ensure_voice(interaction)
-    if err:
-        return await interaction.followup.send(err, ephemeral=True)
-
-    await interaction.followup.send(f"📢: {text}", ephemeral=True)
-
-    await play_tts(vc, text)
-
-
-@bot.tree.command(name="auto", guild=GUILD_OBJ)
+@bot.tree.command(name="auto", guild=discord.Object(id=GUILD_ID))
 async def auto(interaction: discord.Interaction):
-    global AUTO_TTS, TTS_CHANNEL_ID
-    AUTO_TTS = True
-    TTS_CHANNEL_ID = interaction.channel.id
-    await interaction.response.send_message("🎙️ AUTO: ON", ephemeral=True)
+    state["AUTO_TTS"] = True
+    state["TTS_CHANNEL_ID"] = interaction.channel.id
+    await interaction.response.send_message("🎙️ Auto TTS: BẬT", ephemeral=True)
 
-
-@bot.tree.command(name="tat", guild=GUILD_OBJ)
+@bot.tree.command(name="tat", guild=discord.Object(id=GUILD_ID))
 async def tat(interaction: discord.Interaction):
-    global AUTO_TTS
-    AUTO_TTS = False
-    await interaction.response.send_message("🔇 AUTO: OFF", ephemeral=True)
+    state["AUTO_TTS"] = False
+    await interaction.response.send_message("🔇 Auto TTS: TẮT", ephemeral=True)
 
-
-@bot.tree.command(name="out", guild=GUILD_OBJ)
+@bot.tree.command(name="out", guild=discord.Object(id=GUILD_ID))
 async def out(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc:
-        await vc.disconnect(force=True)
-        await interaction.response.send_message("👋 Bye", ephemeral=True)
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("👋 Tạm biệt")
     else:
-        await interaction.response.send_message("Không ở voice", ephemeral=True)
-
-
-@bot.tree.command(name="resetvoice", guild=GUILD_OBJ)
-async def resetvoice(interaction: discord.Interaction):
-    await cleanup_voice(interaction.guild)
-    await interaction.response.send_message("🔄 Reset xong", ephemeral=True)
-
+        await interaction.response.send_message("Bot đang không ở trong voice")
 
 # ==========================================
-# RUN
+# KHỞI CHẠY (VỚI CƠ CHẾ TỰ RESTART)
 # ==========================================
-def start_bot():
-    bot.run(TOKEN)
+def main():
+    # Chạy Web server
+    Thread(target=run_web, daemon=True).start()
 
+    retry_count = 0
+    while True:
+        try:
+            bot.run(TOKEN)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_count += 1
+                wait_time = min(2**retry_count, 300) # Đợi lũy thừa (2s, 4s, 8s... max 5 phút)
+                print(f"🔥 LỖI 429 (Rate Limit). Thử lại sau {wait_time} giây...")
+                # Nếu bị chặn quá nặng, thoát code để Render tự cấp IP mới
+                if retry_count > 5:
+                    print("Quá nhiều lỗi 429, yêu cầu Render đổi IP...")
+                    sys.exit(1) 
+                
+                import time
+                time.sleep(wait_time)
+            else:
+                print(f"Lỗi HTTP: {e}")
+                break
+        except Exception as e:
+            print(f"Lỗi không xác định: {e}")
+            break
 
-Thread(target=start_bot, daemon=True).start()
-run_web()
+if __name__ == "__main__":
+    main()
