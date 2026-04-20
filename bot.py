@@ -9,6 +9,12 @@ from flask import Flask
 from threading import Thread
 
 # ==========================================
+# CONFIG
+# ==========================================
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = 1440581960069287939
+
+# ==========================================
 # WEB SERVER (Render Web Service)
 # ==========================================
 app = Flask(__name__)
@@ -31,8 +37,6 @@ def run_web():
 # ==========================================
 # DISCORD BOT
 # ==========================================
-TOKEN = os.getenv("DISCORD_TOKEN")
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
@@ -134,9 +138,12 @@ async def play_tts(vc, text):
 @bot.event
 async def on_ready():
     try:
-        await bot.tree.sync()
+        guild = discord.Object(id=GUILD_ID)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"⚡ Sync {len(synced)} commands trong guild")
     except Exception as e:
         print("SYNC ERROR:", repr(e))
+
     print(f"✅ Bot online: {bot.user}")
 
 
@@ -189,7 +196,6 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    # chống spam nhẹ
     now = asyncio.get_event_loop().time()
     uid = message.author.id
 
@@ -202,9 +208,12 @@ async def on_message(message: discord.Message):
 
 
 # ==========================================
-# SLASH COMMAND
+# SLASH COMMAND (GUILD)
 # ==========================================
-@bot.tree.command(name="join", description="Vào voice")
+GUILD_OBJ = discord.Object(id=GUILD_ID)
+
+
+@bot.tree.command(name="join", guild=GUILD_OBJ)
 async def join(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
@@ -215,12 +224,11 @@ async def join(interaction: discord.Interaction):
     await interaction.followup.send(f"✅ Đã vào {vc.channel.name}")
 
 
-@bot.tree.command(name="n", description="TTS")
+@bot.tree.command(name="n", guild=GUILD_OBJ)
 async def n(interaction: discord.Interaction, text: str):
     if not interaction.user.voice or not interaction.user.voice.channel:
         return await interaction.response.send_message("❌ Bạn chưa vào Voice!", ephemeral=True)
 
-    # 🔥 FIX 429
     await interaction.response.defer(ephemeral=True)
 
     vc, err = await ensure_voice(interaction)
@@ -232,7 +240,7 @@ async def n(interaction: discord.Interaction, text: str):
     await play_tts(vc, text)
 
 
-@bot.tree.command(name="auto", description="Auto đọc")
+@bot.tree.command(name="auto", guild=GUILD_OBJ)
 async def auto(interaction: discord.Interaction):
     global AUTO_TTS, TTS_CHANNEL_ID
     AUTO_TTS = True
@@ -240,14 +248,14 @@ async def auto(interaction: discord.Interaction):
     await interaction.response.send_message("🎙️ AUTO: ON", ephemeral=True)
 
 
-@bot.tree.command(name="tat", description="Tắt auto")
+@bot.tree.command(name="tat", guild=GUILD_OBJ)
 async def tat(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = False
     await interaction.response.send_message("🔇 AUTO: OFF", ephemeral=True)
 
 
-@bot.tree.command(name="out", description="Thoát voice")
+@bot.tree.command(name="out", guild=GUILD_OBJ)
 async def out(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
@@ -257,7 +265,7 @@ async def out(interaction: discord.Interaction):
         await interaction.response.send_message("Không ở voice", ephemeral=True)
 
 
-@bot.tree.command(name="resetvoice", description="Reset voice")
+@bot.tree.command(name="resetvoice", guild=GUILD_OBJ)
 async def resetvoice(interaction: discord.Interaction):
     await cleanup_voice(interaction.guild)
     await interaction.response.send_message("🔄 Reset xong", ephemeral=True)
