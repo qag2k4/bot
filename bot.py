@@ -39,9 +39,11 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 speech_lock = asyncio.Lock()
+voice_lock = asyncio.Lock()
+
 AUTO_TTS = False
 TTS_CHANNEL_ID = None
-
+last_tts_time = {}
 
 # ==========================================
 # HÀM PHỤ
@@ -56,35 +58,31 @@ async def cleanup_voice(guild: discord.Guild):
 
 
 async def ensure_voice(interaction: discord.Interaction):
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        return None, "❌ Bạn chưa vào Voice!"
+    async with voice_lock:
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return None, "❌ Bạn chưa vào Voice!"
 
-    channel = interaction.user.voice.channel
-    vc = interaction.guild.voice_client
+        channel = interaction.user.voice.channel
+        vc = interaction.guild.voice_client
 
-    try:
-        # Nếu bot đang có voice client và vẫn còn kết nối
-        if vc and vc.is_connected():
-            # Cùng phòng thì giữ nguyên
-            if vc.channel and vc.channel.id == channel.id:
-                return vc, None
+        try:
+            if vc and vc.is_connected():
+                if vc.channel and vc.channel.id == channel.id:
+                    return vc, None
 
-            # Khác phòng thì chuyển phòng
-            await vc.move_to(channel)
-            return interaction.guild.voice_client, None
+                await vc.move_to(channel)
+                return interaction.guild.voice_client, None
 
-        # Nếu vc tồn tại nhưng đang lỗi/kẹt
-        if vc and not vc.is_connected():
+            if vc and not vc.is_connected():
+                await cleanup_voice(interaction.guild)
+
+            vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True)
+            return vc, None
+
+        except Exception as e:
+            print("ENSURE VOICE ERROR:", repr(e))
             await cleanup_voice(interaction.guild)
-
-        # Kết nối mới
-        vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True)
-        return vc, None
-
-    except Exception as e:
-        print("ENSURE VOICE ERROR:", repr(e))
-        await cleanup_voice(interaction.guild)
-        return None, f"❌ Lỗi voice: {type(e).__name__}: {e}"
+            return None, f"❌ Lỗi voice: {type(e).__name__}: {e}"
 
 
 async def play_tts(vc, text):
@@ -92,13 +90,16 @@ async def play_tts(vc, text):
         filename = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.mp3")
 
         try:
+            # giới hạn độ dài
+            if len(text) > 200:
+                text = text[:200]
+
             tts = gTTS(text=text, lang='vi')
             await asyncio.to_thread(tts.save, filename)
 
             if not vc or not vc.is_connected():
                 return
 
-            # Nếu đang phát thì chờ xong
             while vc.is_playing() or vc.is_paused():
                 await asyncio.sleep(0.2)
 
@@ -139,21 +140,18 @@ async def on_ready():
     print(f"✅ Bot online: {bot.user}")
 
 
-# Chỉ tự out khi phòng của bot trống hoàn toàn trong 60 giây
 @bot.event
 async def on_voice_state_update(member, before, after):
     vc = member.guild.voice_client
     if not vc or not vc.channel:
         return
 
-    # Chỉ xét khi ai đó rời khỏi đúng phòng bot đang ở
     if before.channel and vc.channel and before.channel.id == vc.channel.id:
         humans = [m for m in vc.channel.members if not m.bot]
 
         if len(humans) == 0:
             await asyncio.sleep(60)
 
-            # Lấy lại vc sau khi ngủ để tránh object cũ bị lỗi
             vc = member.guild.voice_client
             if not vc or not vc.channel:
                 return
@@ -162,14 +160,14 @@ async def on_voice_state_update(member, before, after):
             if len(humans) == 0:
                 try:
                     await vc.disconnect(force=True)
-                    print(f"🔌 Tự out khỏi {vc.channel} vì phòng trống 60 giây.")
+                    print(f"🔌 Tự out vì phòng trống.")
                 except Exception as e:
                     print("AUTO DISCONNECT ERROR:", repr(e))
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    global AUTO_TTS, TTS_CHANNEL_ID
+    global AUTO_TTS, TTS_CHANNEL_ID, last_tts_time
 
     if message.author.bot or not AUTO_TTS:
         return
@@ -188,14 +186,25 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
-    if content:
-        asyncio.create_task(play_tts(vc, content))
+    if not content:
+        return
+
+    # chống spam nhẹ
+    now = asyncio.get_event_loop().time()
+    uid = message.author.id
+
+    if uid in last_tts_time and now - last_tts_time[uid] < 2:
+        return
+
+    last_tts_time[uid] = now
+
+    await play_tts(vc, content)
 
 
 # ==========================================
-# LỆNH SLASH (/)
+# SLASH COMMAND
 # ==========================================
-@bot.tree.command(name="join", description="Mời bot vào phòng Voice")
+@bot.tree.command(name="join", description="Vào voice")
 async def join(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
@@ -203,10 +212,10 @@ async def join(interaction: discord.Interaction):
     if err:
         return await interaction.followup.send(err)
 
-    await interaction.followup.send(f"✅ Đã vào phòng **{vc.channel.name}**!")
+    await interaction.followup.send(f"✅ Đã vào {vc.channel.name}")
 
 
-@bot.tree.command(name="n", description="Nói và tự vào phòng nếu cần")
+@bot.tree.command(name="n", description="TTS")
 async def n(interaction: discord.Interaction, text: str):
     if not interaction.user.voice or not interaction.user.voice.channel:
         return await interaction.response.send_message("❌ Bạn chưa vào Voice!", ephemeral=True)
@@ -217,44 +226,38 @@ async def n(interaction: discord.Interaction, text: str):
     if err:
         return await interaction.followup.send(err, ephemeral=True)
 
-    asyncio.create_task(play_tts(vc, text))
+    await play_tts(vc, text)
 
 
-@bot.tree.command(name="auto", description="Bật tự đọc (Cùng phòng)")
+@bot.tree.command(name="auto", description="Auto đọc")
 async def auto(interaction: discord.Interaction):
     global AUTO_TTS, TTS_CHANNEL_ID
     AUTO_TTS = True
     TTS_CHANNEL_ID = interaction.channel.id
-    await interaction.response.send_message("🎙️ **AUTO: BẬT**", ephemeral=True)
+    await interaction.response.send_message("🎙️ AUTO: ON", ephemeral=True)
 
 
-@bot.tree.command(name="tat", description="Tắt tự đọc")
+@bot.tree.command(name="tat", description="Tắt auto")
 async def tat(interaction: discord.Interaction):
     global AUTO_TTS
     AUTO_TTS = False
-    await interaction.response.send_message("🔇 **AUTO: TẮT**", ephemeral=True)
+    await interaction.response.send_message("🔇 AUTO: OFF", ephemeral=True)
 
 
-@bot.tree.command(name="out", description="Thoát Voice ngay lập tức")
+@bot.tree.command(name="out", description="Thoát voice")
 async def out(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
-        try:
-            await vc.disconnect(force=True)
-            await interaction.response.send_message("👋 Bye!", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Lỗi khi thoát: {e}", ephemeral=True)
+        await vc.disconnect(force=True)
+        await interaction.response.send_message("👋 Bye", ephemeral=True)
     else:
-        await interaction.response.send_message("Bot đang không ở trong phòng nào.", ephemeral=True)
+        await interaction.response.send_message("Không ở voice", ephemeral=True)
 
 
-@bot.tree.command(name="resetvoice", description="Reset voice client nếu bot bị kẹt")
+@bot.tree.command(name="resetvoice", description="Reset voice")
 async def resetvoice(interaction: discord.Interaction):
-    try:
-        await cleanup_voice(interaction.guild)
-        await interaction.response.send_message("🔄 Đã reset voice client.", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Reset thất bại: {e}", ephemeral=True)
+    await cleanup_voice(interaction.guild)
+    await interaction.response.send_message("🔄 Reset xong", ephemeral=True)
 
 
 bot.run(TOKEN)
